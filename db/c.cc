@@ -4666,6 +4666,11 @@ void rocksdb_transaction_options_set_max_write_batch_size(
   opt->rep.max_write_batch_size = size;
 }
 
+void rocksdb_transaction_options_set_skip_prepare(
+    rocksdb_transaction_options_t* opt, unsigned char v) {
+  opt->rep.skip_prepare = v;
+}
+
 rocksdb_optimistictransaction_options_t*
 rocksdb_optimistictransaction_options_create() {
   return new rocksdb_optimistictransaction_options_t;
@@ -4767,6 +4772,40 @@ rocksdb_transaction_t* rocksdb_transaction_begin(
   return old_txn;
 }
 
+rocksdb_transaction_t** rocksdb_transactiondb_get_prepared_transactions(
+    rocksdb_transactiondb_t* txn_db, size_t* cnt) {
+  std::vector<Transaction*> txns;
+  txn_db->rep->GetAllPreparedTransactions(&txns);
+  *cnt = txns.size();
+  if (txns.empty()) {
+    return nullptr;
+  } else {
+    rocksdb_transaction_t** buf = 
+      (rocksdb_transaction_t**)malloc(txns.size() * sizeof(rocksdb_transaction_t*));
+    for (size_t i = 0; i < txns.size(); i++) {
+      buf[i] = new rocksdb_transaction_t;
+      buf[i]->rep = txns[i];
+    }
+    return buf;
+  }
+}
+
+void rocksdb_transaction_set_name(rocksdb_transaction_t* txn, const char* name,
+                                  size_t name_len, char** errptr) {
+  std::string str = std::string(name, name_len);
+  SaveError(errptr, txn->rep->SetName(str));
+}
+
+char* rocksdb_transaction_get_name(rocksdb_transaction_t* txn, size_t* name_len) {
+  auto name = txn->rep->GetName();
+  *name_len = name.size();
+  return CopyString(name);
+}
+
+void rocksdb_transaction_prepare(rocksdb_transaction_t* txn, char** errptr) {
+  SaveError(errptr, txn->rep->Prepare());
+}
+
 void rocksdb_transaction_commit(rocksdb_transaction_t* txn, char** errptr) {
   SaveError(errptr, txn->rep->Commit());
 }
@@ -4818,6 +4857,22 @@ char* rocksdb_transaction_get(rocksdb_transaction_t* txn,
   return result;
 }
 
+rocksdb_pinnableslice_t* rocksdb_transaction_get_pinned(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    const char* key, size_t klen, char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn->rep->Get(options->rep, Slice(key, klen), &v->rep);
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
+}
+
+
 char* rocksdb_transaction_get_cf(rocksdb_transaction_t* txn,
                                  const rocksdb_readoptions_t* options,
                                  rocksdb_column_family_handle_t* column_family,
@@ -4837,6 +4892,22 @@ char* rocksdb_transaction_get_cf(rocksdb_transaction_t* txn,
     }
   }
   return result;
+}
+
+rocksdb_pinnableslice_t* rocksdb_transaction_get_pinned_cf(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, const char* key, size_t klen,
+    char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn->rep->Get(options->rep, column_family->rep, Slice(key, klen), &v->rep);
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
 }
 
 // Read a key inside a transaction
@@ -4861,6 +4932,22 @@ char* rocksdb_transaction_get_for_update(rocksdb_transaction_t* txn,
   return result;
 }
 
+rocksdb_pinnableslice_t* rocksdb_transaction_get_pinned_for_update(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    const char* key, size_t klen, unsigned char exclusive, char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn->rep->GetForUpdate(options->rep, Slice(key, klen), v->rep.GetSelf(), exclusive);
+  v->rep.PinSelf();
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
+}
+
 char* rocksdb_transaction_get_for_update_cf(
     rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
     rocksdb_column_family_handle_t* column_family, const char* key, size_t klen,
@@ -4879,6 +4966,22 @@ char* rocksdb_transaction_get_for_update_cf(
     }
   }
   return result;
+}
+
+rocksdb_pinnableslice_t* rocksdb_transaction_get_pinned_for_update_cf(
+    rocksdb_transaction_t* txn, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, const char* key, size_t klen,
+    unsigned char exclusive, char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn->rep->GetForUpdate(options->rep, column_family->rep, Slice(key, klen), &v->rep, exclusive);
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
 }
 
 // Read a key outside a transaction
@@ -4903,6 +5006,21 @@ char* rocksdb_transactiondb_get(
   return result;
 }
 
+rocksdb_pinnableslice_t* rocksdb_transactiondb_get_pinned(
+    rocksdb_transactiondb_t* txn_db, const rocksdb_readoptions_t* options,
+    const char* key, size_t klen, char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn_db->rep->Get(options->rep, txn_db->rep->DefaultColumnFamily(), Slice(key, klen), &v->rep);
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
+}
+
 char* rocksdb_transactiondb_get_cf(
     rocksdb_transactiondb_t* txn_db, const rocksdb_readoptions_t* options,
     rocksdb_column_family_handle_t* column_family, const char* key,
@@ -4921,6 +5039,22 @@ char* rocksdb_transactiondb_get_cf(
     }
   }
   return result;
+}
+
+rocksdb_pinnableslice_t* rocksdb_transactiondb_get_pinned_cf(
+    rocksdb_transactiondb_t* txn_db, const rocksdb_readoptions_t* options,
+    rocksdb_column_family_handle_t* column_family, const char* key,
+    size_t keylen, char** errptr) {
+  rocksdb_pinnableslice_t* v = new (rocksdb_pinnableslice_t);
+  Status s = txn_db->rep->Get(options->rep, column_family->rep, Slice(key, keylen), &v->rep);
+  if (!s.ok()) {
+    delete (v);
+    if (!s.IsNotFound()) {
+      SaveError(errptr, s);
+    }
+    return nullptr;
+  }
+  return v;
 }
 
 // Put a key inside a transaction
